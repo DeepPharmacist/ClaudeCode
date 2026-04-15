@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>⚔ YUSHA PARTY</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0b0f18; }
+  @keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:0.2} }
+  @keyframes fadeUp { from{opacity:0;transform:translateY(7px)} to{opacity:1;transform:translateY(0)} }
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-thumb { background: #252d3d; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const AGENTS = [
+  { id:"rimuru",    name:"リムル",   nameEn:"Rimuru",     initial:"リ",  role:"司令官",
+    color:"#5b9eb5", textColor:"#8ecae6", bgAlpha:"rgba(91,158,181,0.15)",
+    systemPrompt:`あなたは「リムル」というAIチームの司令官です。メンバー：シオン（秘書）、シュナ（品質管理）、ソウエイ（情報収集・分析）、ベニマル（実装）、大賢者（検証・テスト）。朗らかで頼もしい口調で。一度の発言は100文字以内で必ず完結させてください。` },
+  { id:"shion",     name:"シオン",   nameEn:"Shion",      initial:"シ",  role:"秘書",
+    color:"#7c5c8a", textColor:"#b89cc8", bgAlpha:"rgba(124,92,138,0.15)",
+    systemPrompt:`あなたは「シオン」というAIチームの秘書です。忠実で熱血な口調で。一度の発言は100文字以内で必ず完結させてください。` },
+  { id:"shuna",     name:"シュナ",   nameEn:"Shuna",      initial:"シュ", role:"品質管理",
+    color:"#b56e8a", textColor:"#d4a0b5", bgAlpha:"rgba(181,110,138,0.15)",
+    systemPrompt:`あなたは「シュナ」というAIチームの品質管理担当です。穏やかで上品だが芯の強い口調で。一度の発言は100文字以内で必ず完結させてください。` },
+  { id:"souei",     name:"ソウエイ", nameEn:"Souei",      initial:"ソ",  role:"情報収集・分析",
+    color:"#3a6080", textColor:"#7aafc8", bgAlpha:"rgba(58,96,128,0.15)",
+    systemPrompt:`あなたは「ソウエイ」というAIチームの情報収集・分析担当です。無口で冷静、端的な口調で。一度の発言は100文字以内で必ず完結させてください。` },
+  { id:"benimaru",  name:"ベニマル", nameEn:"Benimaru",   initial:"ベ",  role:"実装",
+    color:"#9c3a3a", textColor:"#c87878", bgAlpha:"rgba(156,58,58,0.15)",
+    systemPrompt:`あなたは「ベニマル」というAIチームの実装担当です。誇り高く熱意のある口調で。一度の発言は100文字以内で必ず完結させてください。` },
+  { id:"daikensha", name:"大賢者",   nameEn:"Great Sage", initial:"賢",  role:"検証・テスト",
+    color:"#7a7a7a", textColor:"#b8b8b8", bgAlpha:"rgba(138,138,138,0.12)",
+    systemPrompt:`あなたは「大賢者」というAIチームの検証・テスト担当です。無感情で論理的・分析的な口調で。一度の発言は100文字以内で必ず完結させてください。` },
+];
+
+const agentsMap = {};
+AGENTS.forEach(a => agentsMap[a.id] = a);
+const PIPELINE = ["rimuru","shion","shuna","souei","benimaru","daikensha"];
+const MEMBERS = ["shion","shuna","souei","benimaru","daikensha"];
+const STORAGE_KEY = "yusha_party_api_key";
+const ROUND1_SUFFIX = "与えられたタスクに対し、あなたの役割の観点から簡潔に初期見解を述べてください。";
+
+// ── リムル：議論品質の監視＋次アクション決定 ──
+// 返すJSON:
+//   { "action": "direct",   "target": "agentId", "comment": "..." }  → 指名
+//   { "action": "done",     "comment": "" }                           → ラウンド終了
+//   { "action": "intervene","comment": "介入メッセージ" }             → 強制介入
+const RIMURU_ORCHESTRATOR_PROMPT = `あなたは「リムル」というAIチームの司令官です。
+メンバー：シオン（秘書）、シュナ（品質管理）、ソウエイ（情報収集・分析）、ベニマル（実装）、大賢者（検証・テスト）。
+
+会話の流れを読んで、以下のいずれかのJSON形式のみで返してください。他の文章は一切不要です。
+
+【介入すべき状況】同じ意見の繰り返し・堂々巡り・建設的でない対立が続いている場合:
+{"action":"intervene","comment":"リムルの介入メッセージ（話題をリセット・方向転換する内容、60文字以内）"}
+
+【全員最低1回発言済み＆議論が十分深まった場合】:
+{"action":"done","comment":""}
+
+【上記以外・次に発言させたいメンバーを指名】:
+{"action":"direct","target":"メンバーID","comment":"リムルから一言（省略可、30文字以内）"}
+
+メンバーIDは shion / shuna / souei / benimaru / daikensha のいずれか。`;
+
+// ── 各メンバー：自発的発言判定 ──
+// 直前の発言を読んで「今すぐ反応したいか」をJSONで返す
+// { "react": true/false, "reason": "..." }
+const SPONTANEOUS_PROMPT = (agentName, agentRole) =>
+`あなたは「${agentName}」（${agentRole}）です。
+直前の発言を読んで、あなたが今すぐ自発的に発言したいかどうかを判定してください。
+以下のJSON形式のみで返してください。他の文章は一切不要です。
+{"react":true または false}
+reactをtrueにする条件：直前の発言に対して強く同意・反論・補足したい具体的な内容がある場合のみ。
+reactをfalseにする条件：特に追加することがない、または別のメンバーの方が適切な場合。`;
+
+function YushaParty() {
+  const [messages, setMessages]           = useState([]);
+  const [thinkingAgent, setThinkingAgent] = useState(null);
+  const [isRunning, setIsRunning]         = useState(false);
+  const [taskInput, setTaskInput]         = useState("");
+  const [userNote, setUserNote]           = useState("");
+  const [apiKey, setApiKey]               = useState(() => localStorage.getItem(STORAGE_KEY) || "");
+  const [showApiKey, setShowApiKey]       = useState(false);
+  const [error, setError]                 = useState("");
+  const [countdown, setCountdown]         = useState(0);
+  const [resumeFrom, setResumeFrom]       = useState(null);
+  const [savedContext, setSavedContext]   = useState([]);
+  const [round, setRound]                 = useState(1);
+  const [keySaved, setKeySaved]           = useState(false);
+  const [roundDone, setRoundDone]         = useState(false);
+  const [modeLabel, setModeLabel]         = useState("");
+  const chatRef = useRef(null);
+  const apiKeyRef = useRef(apiKey);
+  useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
+
+  useEffect(() => {
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  }, [messages, thinkingAgent]);
+
+  const addMsg = msg => setMessages(prev => [...prev, { ...msg, id: Date.now() + Math.random() }]);
+
+  const waitWithCountdown = async sec => {
+    for (let i = sec; i > 0; i--) { setCountdown(i); await new Promise(r => setTimeout(r, 1000)); }
+    setCountdown(0);
+  };
+
+  const callAPI = useCallback(async (msgs, systemPrompt, maxTokens = 300, retryCount = 0) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKeyRef.current,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: maxTokens, system: systemPrompt, messages: msgs }),
+    });
+    if (res.status === 429 && retryCount < 3) {
+      const waitSec = (retryCount + 1) * 12;
+      addMsg({ agentId:"system", text:`レートリミット検知。${waitSec}秒待機してリトライします (${retryCount + 1}/3)`, isSystem:true });
+      await waitWithCountdown(waitSec);
+      return callAPI(msgs, systemPrompt, maxTokens, retryCount + 1);
+    }
+    if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || `API Error ${res.status}`); }
+    return res.json();
+  }, []);
+
+  // エージェントの発言を取得
+  const callAgent = useCallback(async (agentId, context, extraSuffix = "") => {
+    const agent = agentsMap[agentId];
+    setThinkingAgent(agentId);
+    const msgs = [
+      ...context.map(m => ({ role:"user", content:`${m.name}（${m.role}）: ${m.text}` })),
+      { role:"user", content:`あなたは${agent.name}（${agent.role}）です。上記の会話を踏まえて返答してください。` },
+    ];
+    const data = await callAPI(msgs, agent.systemPrompt + extraSuffix, 300);
+    setThinkingAgent(null);
+    return data.content[0].text;
+  }, [callAPI]);
+
+  // 自発的発言チェック（50トークンで軽量判定）
+  const checkSpontaneous = useCallback(async (agentId, context) => {
+    const agent = agentsMap[agentId];
+    const lastMsg = context[context.length - 1];
+    if (!lastMsg || lastMsg.agentId === agentId) return false; // 自分の直後は反応しない
+    const msgs = [
+      { role:"user", content:`直前の発言：${lastMsg.name}（${lastMsg.role}）:「${lastMsg.text}」` },
+      { role:"user", content:`あなたは${agent.name}です。この発言に今すぐ反応しますか？` },
+    ];
+    try {
+      const data = await callAPI(msgs, SPONTANEOUS_PROMPT(agent.name, agent.role), 50);
+      const raw = data.content[0].text.trim();
+      const parsed = JSON.parse(raw.match(/\{.*\}/s)?.[0] || raw);
+      return parsed.react === true;
+    } catch { return false; }
+  }, [callAPI]);
+
+  // リムルのオーケストレーター判定
+  const askOrchestrator = useCallback(async (context, spokeMembersThisRound) => {
+    const msgs = [
+      ...context.map(m => ({ role:"user", content:`${m.name}（${m.role}）: ${m.text}` })),
+      { role:"user", content:`今ラウンドの発言済みメンバー：${[...spokeMembersThisRound].join(", ") || "なし"}。次のアクションをJSONで返してください。` },
+    ];
+    try {
+      const data = await callAPI(msgs, RIMURU_ORCHESTRATOR_PROMPT, 100);
+      const raw = data.content[0].text.trim();
+      return JSON.parse(raw.match(/\{.*\}/s)?.[0] || raw);
+    } catch { return { action:"done", comment:"" }; }
+  }, [callAPI]);
+
+  // ── ラウンド1：全員が順番に発言 ──
+  const runRound1 = useCallback(async (startIndex, initialContext) => {
+    setIsRunning(true); setError(""); setResumeFrom(null); setRoundDone(false);
+    setModeLabel("全員発言モード");
+    const context = [...initialContext];
+    try {
+      for (let i = startIndex; i < PIPELINE.length; i++) {
+        const agentId = PIPELINE[i], agent = agentsMap[agentId];
+        const text = await callAgent(agentId, context, ROUND1_SUFFIX);
+        const msg = { agentId, name:agent.name, role:agent.role, text, time:new Date().toTimeString().slice(0,8) };
+        addMsg(msg); context.push(msg);
+        setSavedContext([...context]); setResumeFrom(i + 1);
+        if (i < PIPELINE.length - 1) await new Promise(r => setTimeout(r, 4000));
+      }
+      addMsg({ agentId:"system", text:"⚔ ラウンド1完了！追加情報があれば入力してから「次のラウンドへ」を押してください。", isSystem:true });
+      setResumeFrom(null); setRoundDone(true);
+    } catch (e) {
+      setError(e.message);
+      addMsg({ agentId:"system", text:`中断しました。「再開」ボタンで続きから再試行できます。`, isSystem:true, isError:true });
+    }
+    setThinkingAgent(null); setIsRunning(false);
+  }, [callAgent]);
+
+  // ── ラウンド2以降：自由討議＋リムル監視 ──
+  const runFreeRound = useCallback(async (initialContext) => {
+    setIsRunning(true); setError(""); setRoundDone(false);
+    setModeLabel("自由討議モード");
+    const context = [...initialContext];
+    const spokeMembersThisRound = new Set();
+    const MAX_TURNS = 12;
+    let turns = 0;
+
+    try {
+      while (turns < MAX_TURNS) {
+        turns++;
+
+        // ── Step1: 直前発言への自発的反応チェック ──
+        // 直前がリムルの介入や指名コメントの場合はスキップ
+        const lastMsg = context[context.length - 1];
+        let spontaneousResponder = null;
+
+        if (lastMsg && lastMsg.agentId !== "user" && lastMsg.agentId !== "system") {
+          // リムルの指名コメント以外なら自発チェック
+          // 候補：直前発言者以外のメンバー（まだ発言していない人を優先）
+          const candidates = MEMBERS.filter(id => id !== lastMsg.agentId);
+          // 未発言メンバー優先
+          const unspokeFirst = [
+            ...candidates.filter(id => !spokeMembersThisRound.has(id)),
+            ...candidates.filter(id => spokeMembersThisRound.has(id)),
+          ].slice(0, 3); // 最大3人チェック（API節約）
+
+          for (const candidateId of unspokeFirst) {
+            setThinkingAgent(candidateId); // チェック中表示
+            const wants = await checkSpontaneous(candidateId, context);
+            setThinkingAgent(null);
+            if (wants) {
+              spontaneousResponder = candidateId;
+              break;
+            }
+            await new Promise(r => setTimeout(r, 500));
+          }
+        }
+
+        if (spontaneousResponder) {
+          // 自発的に反応するエージェントが見つかった
+          const agent = agentsMap[spontaneousResponder];
+          addMsg({ agentId:"system", text:`💬 ${agent.name}が自発的に発言`, isSystem:true });
+          const text = await callAgent(spontaneousResponder, context);
+          const msg = { agentId:spontaneousResponder, name:agent.name, role:agent.role, text, time:new Date().toTimeString().slice(0,8) };
+          addMsg(msg); context.push(msg);
+          spokeMembersThisRound.add(spontaneousResponder);
+          setSavedContext([...context]);
+          await new Promise(r => setTimeout(r, 3000));
+
+        } else {
+          // ── Step2: リムルがオーケストレート ──
+          setThinkingAgent("rimuru");
+          const decision = await askOrchestrator(context, spokeMembersThisRound);
+          setThinkingAgent(null);
+
+          if (decision.action === "done") {
+            break;
+
+          } else if (decision.action === "intervene") {
+            // 強制介入
+            const rimuru = agentsMap["rimuru"];
+            addMsg({ agentId:"system", text:"⚠ リムルが議論に介入します", isSystem:true });
+            addMsg({ agentId:"rimuru", name:rimuru.name, role:rimuru.role, text:decision.comment, time:new Date().toTimeString().slice(0,8) });
+            context.push({ agentId:"rimuru", name:rimuru.name, role:rimuru.role, text:decision.comment });
+            spokeMembersThisRound.clear(); // 介入後はリセットして全員に再発言の機会
+            await new Promise(r => setTimeout(r, 3000));
+
+          } else if (decision.action === "direct") {
+            // 指名
+            const targetId = decision.target;
+            if (!agentsMap[targetId]) break;
+            if (decision.comment) {
+              const rimuru = agentsMap["rimuru"];
+              addMsg({ agentId:"rimuru", name:rimuru.name, role:rimuru.role, text:decision.comment, time:new Date().toTimeString().slice(0,8) });
+              context.push({ agentId:"rimuru", name:rimuru.name, role:rimuru.role, text:decision.comment });
+              await new Promise(r => setTimeout(r, 2000));
+            }
+            const text = await callAgent(targetId, context);
+            const agent = agentsMap[targetId];
+            const msg = { agentId:targetId, name:agent.name, role:agent.role, text, time:new Date().toTimeString().slice(0,8) };
+            addMsg(msg); context.push(msg);
+            spokeMembersThisRound.add(targetId);
+            setSavedContext([...context]);
+            await new Promise(r => setTimeout(r, 3000));
+          }
+        }
+      }
+
+      addMsg({ agentId:"system", text:`⚔ ラウンド完了！追加情報があれば入力してから「次のラウンドへ」を押してください。`, isSystem:true });
+      setRoundDone(true);
+      setSavedContext(context);
+    } catch (e) {
+      setError(e.message);
+      addMsg({ agentId:"system", text:`エラーで中断しました。`, isSystem:true, isError:true });
+    }
+    setThinkingAgent(null); setIsRunning(false);
+  }, [callAgent, checkSpontaneous, askOrchestrator]);
+
+  const handleStart = useCallback(() => {
+    if (!taskInput.trim() || !apiKeyRef.current.trim() || isRunning) return;
+    const ctx = [{ agentId:"user", name:"ユーザー", role:"依頼者", text:taskInput }];
+    setMessages([]); setSavedContext(ctx); setRound(1); setRoundDone(false);
+    addMsg({ agentId:"system", text:`クエスト開始：「${taskInput}」`, isSystem:true });
+    runRound1(0, ctx);
+  }, [taskInput, isRunning, runRound1]);
+
+  const handleNextRound = useCallback(() => {
+    if (isRunning || !roundDone) return;
+    const nextRound = round + 1; setRound(nextRound);
+    let ctx = [...savedContext];
+    if (userNote.trim()) {
+      ctx.push({ agentId:"user", name:"ユーザー", role:"依頼者", text:`【追加情報】${userNote.trim()}` });
+      addMsg({ agentId:"system", text:`ユーザーより：「${userNote.trim()}」`, isSystem:true });
+      setUserNote("");
+    }
+    ctx.push({ agentId:"user", name:"システム", role:"", text:`ラウンド${nextRound}開始。前回の議論を踏まえさらに深掘りしてください。` });
+    setSavedContext(ctx);
+    addMsg({ agentId:"system", text:`── ラウンド ${nextRound} 開始（自由討議＋リムル監視） ──`, isSystem:true });
+    runFreeRound(ctx);
+  }, [isRunning, roundDone, round, savedContext, userNote, runFreeRound]);
+
+  const handleResume = useCallback(() => {
+    if (isRunning || resumeFrom === null || resumeFrom >= PIPELINE.length) return;
+    addMsg({ agentId:"system", text:`${agentsMap[PIPELINE[resumeFrom]].name}から再開します...`, isSystem:true });
+    runRound1(resumeFrom, savedContext);
+  }, [isRunning, resumeFrom, savedContext, runRound1]);
+
+  const doneAgents   = new Set(messages.filter(m => !m.isSystem && m.agentId).map(m => m.agentId));
+  const canStart     = taskInput.trim() && apiKey.trim() && !isRunning;
+  const canResume    = !isRunning && resumeFrom !== null && resumeFrom < PIPELINE.length && apiKey.trim();
+  const canNextRound = !isRunning && roundDone && apiKey.trim();
+
+  function renderMarkdown(text) {
+    return text.split(/(\*\*.*?\*\*|\*.*?\*)/g).map((part, i) => {
+      if (part.startsWith("**") && part.endsWith("**")) return <strong key={i} style={{fontWeight:700,color:"#e8f0f8"}}>{part.slice(2,-2)}</strong>;
+      if (part.startsWith("*")  && part.endsWith("*"))  return <em key={i} style={{fontStyle:"italic",color:"#d0dde8"}}>{part.slice(1,-1)}</em>;
+      return part;
+    });
+  }
+
+  const S = {
+    root:     { fontFamily:"'Hiragino Sans','Noto Sans JP',sans-serif", background:"#0b0f18", color:"#e6edf3", minHeight:"100vh", display:"flex", flexDirection:"column" },
+    header:   { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 18px", borderBottom:"1px solid #252d3d", background:"#111827" },
+    grid:     { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(165px,1fr))", gap:8, padding:10 },
+    card:     (a,t,d) => ({ borderRadius:8, padding:10, border:"1px solid #252d3d", borderLeft:`3px solid ${a.color}`, background:a.bgAlpha, position:"relative", transition:"box-shadow .4s,opacity .4s", opacity:t?1:d?.9:.55, boxShadow:t?`0 0 20px ${a.color}66`:"none" }),
+    dot:      (t,d)   => ({ position:"absolute", top:9, right:9, width:7, height:7, borderRadius:"50%", background:t?"#c8a84a":d?"#4a7a5a":"#333", animation:t?"pulse 1.8s infinite":"none" }),
+    avatar:   (color,sz=33) => ({ width:sz, height:sz, borderRadius:"50%", background:color, display:"flex", alignItems:"center", justifyContent:"center", fontSize:sz*.33, fontWeight:700, color:"#fff", flexShrink:0, border:`1px solid ${color}88` }),
+    chat:     { borderTop:"1px solid #252d3d", padding:"12px 16px", display:"flex", flexDirection:"column", gap:14, flex:1, overflowY:"auto", maxHeight:"calc(100vh - 460px)", minHeight:180 },
+    inputBar: { borderTop:"1px solid #252d3d", padding:"10px 12px", background:"#111827", display:"flex", flexDirection:"column", gap:8 },
+    input:    { background:"#0b0f18", border:"1px solid #252d3d", borderRadius:6, color:"#e6edf3", padding:"7px 10px", fontSize:13, flex:1, outline:"none" },
+    btn:      (dis,bg="#5b9eb5") => ({ padding:"7px 14px", borderRadius:6, border:"none", cursor:dis?"not-allowed":"pointer", background:dis?"#1e2433":bg, color:dis?"#445":"#fff", fontWeight:700, fontSize:13, transition:"background .2s", whiteSpace:"nowrap" }),
+    footer:   { display:"flex", alignItems:"center", gap:12, padding:"6px 16px", borderTop:"1px solid #252d3d", fontSize:11, color:"#4a6a7a" },
+  };
+
+  return (
+    <div style={S.root}>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.2}} @keyframes fadeUp{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}} ::-webkit-scrollbar{width:5px} ::-webkit-scrollbar-thumb{background:#252d3d;border-radius:3px}`}</style>
+
+      <div style={S.header}>
+        <div>
+          <div style={{fontSize:16,fontWeight:800,letterSpacing:"0.12em",color:"#c8d8e8"}}>⚔ YUSHA PARTY</div>
+          <div style={{fontSize:10,color:"#5a7a9a",letterSpacing:"0.2em"}}>MULTI-AGENT COMMAND SYSTEM</div>
+        </div>
+        <span style={{fontSize:11,color:isRunning?"#c8a84a":canResume?"#7c5c8a":"#4a7a5a",letterSpacing:"0.08em"}}>
+          {isRunning?"⚡ RUNNING":canResume?"⏸ PAUSED":roundDone?"✅ ROUND DONE":"● STANDBY"}
+        </span>
+      </div>
+
+      <div style={S.grid}>
+        {AGENTS.map(agent => {
+          const thinking=thinkingAgent===agent.id, done=doneAgents.has(agent.id), isNext=canResume&&PIPELINE[resumeFrom]===agent.id;
+          return (
+            <div key={agent.id} style={S.card(agent,thinking,done)}>
+              <div style={S.dot(thinking,done)}/>
+              {isNext && <div style={{position:"absolute",top:7,right:20,fontSize:9,background:"#c8a84a",color:"#000",borderRadius:3,padding:"1px 5px",fontWeight:700}}>NEXT</div>}
+              {done&&!thinking&&!isNext && <div style={{position:"absolute",top:8,right:20,fontSize:10,color:"#4a7a5a",fontWeight:700}}>✓</div>}
+              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+                <div style={S.avatar(agent.color)}>{agent.initial}</div>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:700,color:agent.textColor,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{agent.name}</div>
+                  <div style={{fontSize:9,color:"#4a6a7a"}}>{agent.nameEn}</div>
+                </div>
+              </div>
+              <div style={{fontSize:10,color:"#4a6a7a",marginBottom:3}}>{agent.role}</div>
+              <div style={{fontSize:10,lineHeight:1.5,color:thinking?"#c8a84a":done?"#4a7a5a":"#8a9aaa"}}>
+                {thinking?"🔮 思考中...":done?"✔ 発言済":`${agent.role}を担当`}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={S.chat} ref={chatRef}>
+        {messages.length===0 && (
+          <div style={{color:"#3a5a6a",fontSize:12,textAlign:"center",marginTop:28,lineHeight:2.2}}>
+            ⚔ APIキーを入力してクエストを開始してください ⚔<br/>
+            <span style={{fontSize:10}}>勇者パーティが協力してタスクに挑みます</span>
+          </div>
+        )}
+        {messages.map(msg => {
+          if (msg.isSystem) return (
+            <div key={msg.id} style={{textAlign:"center",fontSize:11,color:msg.isError?"#a05050":"#3a5a6a",animation:"fadeUp .3s ease"}}>
+              ── {msg.text} ──
+            </div>
+          );
+          const agent=agentsMap[msg.agentId]; if(!agent) return null;
+          return (
+            <div key={msg.id} style={{display:"flex",gap:10,animation:"fadeUp .35s ease"}}>
+              <div style={S.avatar(agent.color,28)}>{agent.initial}</div>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",gap:8,alignItems:"baseline",marginBottom:3}}>
+                  <span style={{fontSize:12,fontWeight:700,color:agent.textColor}}>{agent.name}</span>
+                  <span style={{fontSize:9,color:"#4a6a7a"}}>{agent.role}</span>
+                  <span style={{fontSize:9,color:"#3a4a5a",marginLeft:"auto"}}>{msg.time}</span>
+                </div>
+                <div style={{fontSize:13,lineHeight:1.75,color:"#c8d8e0"}}>{renderMarkdown(msg.text)}</div>
+              </div>
+            </div>
+          );
+        })}
+        {thinkingAgent&&agentsMap[thinkingAgent]&&(()=>{ const a=agentsMap[thinkingAgent]; return (
+          <div style={{display:"flex",gap:10,alignItems:"center",animation:"fadeUp .3s ease"}}>
+            <div style={S.avatar(a.color,28)}>{a.initial}</div>
+            <span style={{fontSize:12,color:a.textColor}}>{a.name}</span>
+            <span style={{fontSize:18,color:"#2a3a4a",letterSpacing:4}}>・・・</span>
+          </div>
+        ); })()}
+      </div>
+
+      <div style={S.inputBar}>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <span style={{fontSize:11,color:"#4a6a7a",whiteSpace:"nowrap"}}>API Key:</span>
+          <input type={showApiKey?"text":"password"} placeholder="sk-ant-api...（一度保存すれば次回から自動入力）"
+            value={apiKey} onChange={e=>{setApiKey(e.target.value);setKeySaved(false);}}
+            style={{...S.input,fontFamily:"monospace",fontSize:12}}/>
+          <button onClick={()=>setShowApiKey(v=>!v)} style={S.btn(false,"#252d3d")}>{showApiKey?"隠す":"表示"}</button>
+          <button onClick={()=>{localStorage.setItem(STORAGE_KEY,apiKey);setKeySaved(true);}} style={S.btn(false,keySaved?"#2a5a2a":"#3a6080")}>
+            {keySaved?"✓ 保存済":"💾 保存"}
+          </button>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <input type="text" placeholder="クエストを入力（例：ユーザー認証機能を作りたい）"
+            value={taskInput} onChange={e=>setTaskInput(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&canStart&&handleStart()}
+            style={S.input} disabled={isRunning}/>
+          {canResume && <button onClick={handleResume} style={S.btn(false,"#7c5c8a")}>↩ {agentsMap[PIPELINE[resumeFrom]]?.name}から再開</button>}
+          <button onClick={handleStart} disabled={!canStart} style={S.btn(!canStart)}>{isRunning?"出撃中...":"⚔ 出撃"}</button>
+        </div>
+        {canNextRound && (
+          <div style={{display:"flex",gap:8,alignItems:"center",background:"rgba(91,158,181,0.08)",border:"1px solid #252d3d",borderRadius:6,padding:"8px 10px"}}>
+            <span style={{fontSize:11,color:"#7aafc8",whiteSpace:"nowrap"}}>💬 追加情報：</span>
+            <input type="text" placeholder="パーティへ追加情報を伝える（省略可）"
+              value={userNote} onChange={e=>setUserNote(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&handleNextRound()}
+              style={S.input}/>
+            <button onClick={handleNextRound} style={S.btn(false,"#3a6080")}>▶ ラウンド{round+1}へ</button>
+          </div>
+        )}
+        {error && <div style={{fontSize:11,color:"#a05050"}}>⚠ {error}　→ 「再開」ボタンで続きから試せます</div>}
+      </div>
+
+      <div style={S.footer}>
+        <span style={{color:isRunning?"#c8a84a":canResume?"#7c5c8a":roundDone?"#5b9eb5":"#4a7a5a"}}>
+          {isRunning?"⚡ Running":canResume?"⏸ Paused":roundDone?"✅ Round Done":"● Ready"}
+        </span>
+        {countdown>0 && <span style={{color:"#c8a84a",fontWeight:700}}>⏳ リトライまで {countdown}秒...</span>}
+        <span>{messages.filter(m=>!m.isSystem).length} messages</span>
+        <span>Round {round} {modeLabel ? `（${modeLabel}）` : ""}</span>
+        <span style={{marginLeft:"auto"}}>YUSHA PARTY v1.4</span>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<YushaParty />);
+</script>
+</body>
+</html>
