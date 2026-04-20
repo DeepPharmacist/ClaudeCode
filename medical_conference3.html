@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🏥 医療カンファレンス AI</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #f0f4f8; }
+  @keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #b0bec5; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const ALL_AGENTS = [
+  // ── 医師グループ（診断・治療の中核） ──
+  { id:"doctor",       name:"主治医",      nameEn:"Physician",          initial:"主",  role:"主治医",
+    color:"#1565c0", textColor:"#1565c0", bgColor:"#e3f2fd", borderColor:"#90caf9",
+    defaultOn:true,  isOrchestrator:true,
+    systemPrompt:`あなたは入院患者を担当する「主治医」です。診断・治療方針・退院計画の最終責任者として発言します。医学的根拠に基づき他職種の意見を統合しながら方針を示してください。一度の発言は120文字以内で必ず完結させてください。` },
+  { id:"surgeon",      name:"外科医",      nameEn:"Surgeon",            initial:"外",  role:"外科医",
+    color:"#b71c1c", textColor:"#b71c1c", bgColor:"#ffebee", borderColor:"#ef9a9a",
+    defaultOn:false, isOrchestrator:false,
+    systemPrompt:`あなたは「外科医」です。手術適応・術式選択・周術期管理・合併症リスク・術後の機能予後について発言します。外科的介入の必要性と timing を明確に述べてください。一度の発言は120文字以内で必ず完結させてください。` },
+  { id:"oncologist",   name:"腫瘍内科医",  nameEn:"Oncologist",         initial:"腫",  role:"腫瘍内科医",
+    color:"#4a148c", textColor:"#4a148c", bgColor:"#f3e5f5", borderColor:"#ce93d8",
+    defaultOn:false, isOrchestrator:false,
+    systemPrompt:`あなたは「腫瘍内科医」です。がん薬物療法・分子標的治療・免疫療法・緩和ケアの移行・治療目標（治癒・延命・QOL）の設定について発言します。抗がん剤の有害事象管理も含めて述べてください。一度の発言は120文字以内で必ず完結させてください。` },
+  { id:"psychiatrist",  name:"精神科医",   nameEn:"Psychiatrist",       initial:"精",  role:"精神科医",
+    color:"#880e4f", textColor:"#880e4f", bgColor:"#fce4ec", borderColor:"#f48fb1",
+    defaultOn:false, isOrchestrator:false,
+    systemPrompt:`あなたは「精神科医」です。患者の精神症状・認知機能・せん妄・うつ・不安・向精神薬の適正使用について発言します。身体疾患と精神症状の関連を踏まえた包括的な視点で助言してください。一度の発言は120文字以内で必ず完結させてください。` },
+
+  // ── 看護・コメディカル（直接ケア） ──
+  { id:"nurse",        name:"看護師",      nameEn:"Nurse",              initial:"看",  role:"看護師",
+    color:"#6a1b9a", textColor:"#6a1b9a", bgColor:"#ede7f6", borderColor:"#b39ddb",
+    defaultOn:true,  isOrchestrator:false,
+    systemPrompt:`あなたは病棟担当の「看護師」です。患者の日常生活・服薬管理・家族支援・療養環境を中心に発言します。患者の訴えや生活上の問題を現場目線で伝えてください。一度の発言は120文字以内で必ず完結させてください。` },
+  { id:"pt",           name:"理学療法士",  nameEn:"Physical Therapist", initial:"PT",  role:"理学療法士",
+    color:"#e65100", textColor:"#e65100", bgColor:"#fff3e0", borderColor:"#ffcc80",
+    defaultOn:true,  isOrchestrator:false,
+    systemPrompt:`あなたは「理学療法士（PT）」です。患者のADL・身体機能・転倒リスク・リハビリ進捗・退院後の生活環境整備について発言します。機能回復の見通しと在宅復帰に向けた課題を具体的に述べてください。一度の発言は120文字以内で必ず完結させてください。` },
+  { id:"dietitian",    name:"栄養士",      nameEn:"Dietitian",          initial:"栄",  role:"管理栄養士",
+    color:"#00695c", textColor:"#00695c", bgColor:"#e0f2f1", borderColor:"#80cbc4",
+    defaultOn:false, isOrchestrator:false,
+    systemPrompt:`あなたは「管理栄養士」です。患者の栄養状態評価（低栄養・サルコペニア）・栄養補給ルート（経口・経腸・静脈）・食事形態・嚥下機能・特定疾患への栄養療法について発言します。一度の発言は120文字以内で必ず完結させてください。` },
+
+  // ── 薬剤師グループ ──
+  { id:"hospital_ph",  name:"病院薬剤師",  nameEn:"Hospital Pharmacist",initial:"院薬", role:"病院薬剤師",
+    color:"#1b5e20", textColor:"#1b5e20", bgColor:"#e8f5e9", borderColor:"#81c784",
+    defaultOn:true,  isOrchestrator:false,
+    systemPrompt:`あなたは「病院薬剤師」です。入院中の薬物療法管理・TDM・副作用モニタリング・持参薬確認・注射薬の調製・退院時の処方提案について発言します。薬学的見地から治療の安全性と有効性を支援してください。一度の発言は120文字以内で必ず完結させてください。` },
+  { id:"pharmacist",   name:"薬局薬剤師",  nameEn:"Pharmacist",         initial:"局薬", role:"薬局薬剤師",
+    color:"#2e7d32", textColor:"#2e7d32", bgColor:"#f1f8e9", borderColor:"#a5d6a7",
+    defaultOn:true,  isOrchestrator:false,
+    systemPrompt:`あなたは保険薬局の「薬局薬剤師」です。在宅医療・多剤併用・残薬管理・服薬指導・後発品変更の観点から発言します。地域での継続的な服薬支援について具体的に述べてください。一度の発言は120文字以内で必ず完結させてください。` },
+
+  // ── 地域連携・社会的支援 ──
+  { id:"msw",          name:"MSW",         nameEn:"Social Worker",      initial:"SW",  role:"医療ソーシャルワーカー",
+    color:"#558b2f", textColor:"#558b2f", bgColor:"#f9fbe7", borderColor:"#c5e1a5",
+    defaultOn:true,  isOrchestrator:false,
+    systemPrompt:`あなたは「医療ソーシャルワーカー（MSW）」です。患者・家族の社会的背景・経済状況・退院先調整・介護保険申請・地域サービス連携について発言します。退院後の生活を支える社会資源の活用を提案してください。一度の発言は120文字以内で必ず完結させてください。` },
+  { id:"cm",           name:"ケアマネジャー",nameEn:"Care Manager",      initial:"CM",  role:"ケアマネジャー",
+    color:"#f57f17", textColor:"#e65100", bgColor:"#fff8e1", borderColor:"#ffe082",
+    defaultOn:false, isOrchestrator:false,
+    systemPrompt:`あなたは「ケアマネジャー（介護支援専門員）」です。要介護認定・ケアプラン・在宅サービスの調整・介護者の負担軽減について発言します。地域包括ケアの視点から継続的な支援体制を提案してください。一度の発言は120文字以内で必ず完結させてください。` },
+
+  // ── 事務・管理 ──
+  { id:"medadmin",     name:"医事課",      nameEn:"Medical Admin",      initial:"事",  role:"医事課",
+    color:"#37474f", textColor:"#37474f", bgColor:"#eceff1", borderColor:"#b0bec5",
+    defaultOn:false, isOrchestrator:false,
+    systemPrompt:`あなたは「医事課（診療報酬・医療事務）」の担当者です。診療報酬上の算定要件・入院期間と包括払い（DPC）・高額療養費・医療費の患者負担・書類作成（診断書・後遺障害診断書等）について発言します。制度的・経済的な視点から助言してください。一度の発言は120文字以内で必ず完結させてください。` },
+];
+
+const agentsMap = {};
+ALL_AGENTS.forEach(a => agentsMap[a.id] = a);
+const STORAGE_KEY = "medical_conf_api_key";
+const ROUND1_SUFFIX = "病院薬剤師からの相談に対し、あなたの専門の立場から簡潔に初期見解を述べてください。";
+
+const buildOrchestratorPrompt = (activeMemberIds) =>
+`あなたは「主治医」として医療カンファレンスの進行役を務めます。
+参加メンバー：${activeMemberIds.map(id=>`${agentsMap[id].name}（${agentsMap[id].role}）`).join("、")}。
+会話の流れを読んで、以下のいずれかのJSON形式のみで返してください。他の文章は一切不要です。
+【介入すべき状況】同じ意見の繰り返し・建設的でない対立・臨床的に不適切な内容が続く場合:
+{"action":"intervene","comment":"主治医の介入（話題を整理・方向転換する内容、60文字以内）"}
+【全員最低1回発言済み＆議論が十分深まった場合】:
+{"action":"done","comment":""}
+【上記以外・次に発言させたいメンバーを指名】:
+{"action":"direct","target":"メンバーID","comment":"主治医から一言（省略可、30文字以内）"}
+メンバーIDは ${activeMemberIds.filter(id=>!agentsMap[id].isOrchestrator).join(" / ")} のいずれか。`;
+
+const SPONTANEOUS_PROMPT = (name, role) =>
+`あなたは「${name}」（${role}）です。直前の発言を読んで今すぐ自発的に発言したいか判定してください。
+{"react":true または false}
+trueにする条件：専門職として強く同意・反論・補足したい具体的な内容がある場合のみ。
+falseにする条件：特に追加することがない、または他の職種の方が適切な場合。
+JSON形式のみで返してください。`;
+
+function MedicalConference() {
+  const [messages, setMessages]         = useState([]);
+  const [thinkingAgent, setThinkingAgent] = useState(null);
+  const [isRunning, setIsRunning]       = useState(false);
+  const [taskInput, setTaskInput]       = useState("");
+  const [userNote, setUserNote]         = useState("");
+  const [apiKey, setApiKey]             = useState(() => localStorage.getItem(STORAGE_KEY) || "");
+  const [showApiKey, setShowApiKey]     = useState(false);
+  const [error, setError]               = useState("");
+  const [countdown, setCountdown]       = useState(0);
+  const [resumeFrom, setResumeFrom]     = useState(null);
+  const [savedContext, setSavedContext] = useState([]);
+  const [round, setRound]               = useState(1);
+  const [keySaved, setKeySaved]         = useState(false);
+  const [roundDone, setRoundDone]       = useState(false);
+  const [modeLabel, setModeLabel]       = useState("");
+  const [agentEnabled, setAgentEnabled] = useState(() => {
+    const init = {};
+    ALL_AGENTS.forEach(a => init[a.id] = a.defaultOn);
+    return init;
+  });
+  // 途中変更のログ
+  const [memberChanges, setMemberChanges] = useState([]);
+  const chatRef = useRef(null);
+  const apiKeyRef = useRef(apiKey);
+  useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
+
+  useEffect(() => {
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  }, [messages, thinkingAgent]);
+
+  const activeAgents  = ALL_AGENTS.filter(a => agentEnabled[a.id]).map(a => a.id);
+  const orchestratorId = "doctor";
+  const activeMembers = activeAgents.filter(id => !agentsMap[id].isOrchestrator);
+
+  // カード（ON/OFF）トグル
+  const toggleAgent = (id) => {
+    if (agentsMap[id].isOrchestrator) return;
+    const willEnable = !agentEnabled[id];
+    setAgentEnabled(prev => ({ ...prev, [id]: willEnable }));
+    // 会話中の場合はメッセージで通知
+    if (messages.length > 0) {
+      const agent = agentsMap[id];
+      const changeMsg = willEnable
+        ? `✚ ${agent.name}（${agent.role}）がカンファレンスに参加しました`
+        : `✖ ${agent.name}（${agent.role}）がカンファレンスから退席しました`;
+      addMsg({ agentId:"system", text: changeMsg, isSystem:true });
+      setMemberChanges(prev => [...prev, changeMsg]);
+    }
+  };
+
+  const addMsg = msg => setMessages(prev => [...prev, { ...msg, id: Date.now() + Math.random() }]);
+
+  const waitWithCountdown = async sec => {
+    for (let i = sec; i > 0; i--) { setCountdown(i); await new Promise(r => setTimeout(r, 1000)); }
+    setCountdown(0);
+  };
+
+  const callAPI = useCallback(async (msgs, systemPrompt, maxTokens=300, retryCount=0) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "x-api-key": apiKeyRef.current,
+        "anthropic-version":"2023-06-01",
+        "anthropic-dangerous-direct-browser-access":"true",
+      },
+      body: JSON.stringify({ model:"claude-haiku-4-5-20251001", max_tokens:maxTokens, system:systemPrompt, messages:msgs }),
+    });
+    if (res.status===429 && retryCount<3) {
+      const waitSec=(retryCount+1)*12;
+      addMsg({ agentId:"system", text:`レートリミット検知。${waitSec}秒待機してリトライします (${retryCount+1}/3)`, isSystem:true });
+      await waitWithCountdown(waitSec);
+      return callAPI(msgs, systemPrompt, maxTokens, retryCount+1);
+    }
+    if (!res.ok) { const e=await res.json(); throw new Error(e.error?.message || `API Error ${res.status}`); }
+    return res.json();
+  }, []);
+
+  const callAgent = useCallback(async (agentId, context, extraSuffix="") => {
+    const agent = agentsMap[agentId];
+    setThinkingAgent(agentId);
+    const msgs = [
+      ...context.map(m => ({ role:"user", content:`${m.name}（${m.role}）: ${m.text}` })),
+      { role:"user", content:`あなたは${agent.name}（${agent.role}）です。上記の会話を踏まえて返答してください。` },
+    ];
+    const data = await callAPI(msgs, agent.systemPrompt + extraSuffix, 300);
+    setThinkingAgent(null);
+    return data.content[0].text;
+  }, [callAPI]);
+
+  const checkSpontaneous = useCallback(async (agentId, context) => {
+    const agent = agentsMap[agentId];
+    const lastMsg = context[context.length-1];
+    if (!lastMsg || lastMsg.agentId===agentId) return false;
+    const msgs = [
+      { role:"user", content:`直前の発言：${lastMsg.name}（${lastMsg.role}）:「${lastMsg.text}」` },
+      { role:"user", content:`あなたは${agent.name}です。この発言に今すぐ反応しますか？` },
+    ];
+    try {
+      const data = await callAPI(msgs, SPONTANEOUS_PROMPT(agent.name, agent.role), 50);
+      const raw = data.content[0].text.trim();
+      const parsed = JSON.parse(raw.match(/\{.*\}/s)?.[0] || raw);
+      return parsed.react===true;
+    } catch { return false; }
+  }, [callAPI]);
+
+  const askOrchestrator = useCallback(async (context, spokeMembersThisRound, currentActiveIds) => {
+    const msgs = [
+      ...context.map(m => ({ role:"user", content:`${m.name}（${m.role}）: ${m.text}` })),
+      { role:"user", content:`今ラウンドの発言済みメンバー：${[...spokeMembersThisRound].join(", ")||"なし"}。次のアクションをJSONで返してください。` },
+    ];
+    try {
+      const data = await callAPI(msgs, buildOrchestratorPrompt(currentActiveIds), 100);
+      const raw = data.content[0].text.trim();
+      return JSON.parse(raw.match(/\{.*\}/s)?.[0] || raw);
+    } catch { return { action:"done", comment:"" }; }
+  }, [callAPI]);
+
+  // ── ラウンド1：ONメンバーが順番に発言 ──
+  const runRound1 = useCallback(async (startIndex, initialContext, pipeline) => {
+    setIsRunning(true); setError(""); setResumeFrom(null); setRoundDone(false);
+    setModeLabel("全員発言");
+    const context = [...initialContext];
+    try {
+      for (let i=startIndex; i<pipeline.length; i++) {
+        const agentId=pipeline[i], agent=agentsMap[agentId];
+        const text = await callAgent(agentId, context, ROUND1_SUFFIX);
+        const msg = { agentId, name:agent.name, role:agent.role, text, time:new Date().toTimeString().slice(0,8) };
+        addMsg(msg); context.push(msg);
+        setSavedContext([...context]); setResumeFrom(i+1);
+        if (i<pipeline.length-1) await new Promise(r=>setTimeout(r,4000));
+      }
+      addMsg({ agentId:"system", text:"✅ ラウンド1完了！追加情報があれば入力して「次のラウンドへ」を押してください。", isSystem:true });
+      setResumeFrom(null); setRoundDone(true);
+    } catch(e) {
+      setError(e.message);
+      addMsg({ agentId:"system", text:`中断しました。「再開」ボタンで続きから再試行できます。`, isSystem:true, isError:true });
+    }
+    setThinkingAgent(null); setIsRunning(false);
+  }, [callAgent]);
+
+  // ── ラウンド2以降：自由討議＋主治医監視（リアルタイムでメンバー変更を反映） ──
+  const runFreeRound = useCallback(async (initialContext, snapshotActiveIds) => {
+    setIsRunning(true); setError(""); setRoundDone(false);
+    setModeLabel("自由討議");
+    const context = [...initialContext];
+    const spokeMembersThisRound = new Set();
+    const MAX_TURNS = 14;
+    let turns = 0;
+
+    try {
+      while (turns < MAX_TURNS) {
+        turns++;
+        // 毎ターン最新のONメンバーを参照（リアルタイム反映）
+        const currentEnabled = ALL_AGENTS.filter(a => agentEnabled[a.id]).map(a => a.id);
+        const currentMembers = currentEnabled.filter(id => !agentsMap[id].isOrchestrator);
+
+        const lastMsg = context[context.length-1];
+        let spontaneousResponder = null;
+
+        if (lastMsg && lastMsg.agentId!=="user" && lastMsg.agentId!=="system") {
+          const candidates = currentMembers.filter(id => id!==lastMsg.agentId);
+          const prioritized = [
+            ...candidates.filter(id => !spokeMembersThisRound.has(id)),
+            ...candidates.filter(id => spokeMembersThisRound.has(id)),
+          ].slice(0,3);
+          for (const cid of prioritized) {
+            setThinkingAgent(cid);
+            const wants = await checkSpontaneous(cid, context);
+            setThinkingAgent(null);
+            if (wants) { spontaneousResponder=cid; break; }
+            await new Promise(r=>setTimeout(r,500));
+          }
+        }
+
+        if (spontaneousResponder) {
+          const agent = agentsMap[spontaneousResponder];
+          addMsg({ agentId:"system", text:`💬 ${agent.name}が自発的に発言`, isSystem:true });
+          const text = await callAgent(spontaneousResponder, context);
+          const msg = { agentId:spontaneousResponder, name:agent.name, role:agent.role, text, time:new Date().toTimeString().slice(0,8) };
+          addMsg(msg); context.push(msg);
+          spokeMembersThisRound.add(spontaneousResponder);
+          setSavedContext([...context]);
+          await new Promise(r=>setTimeout(r,3000));
+        } else {
+          setThinkingAgent(orchestratorId);
+          const decision = await askOrchestrator(context, spokeMembersThisRound, currentEnabled);
+          setThinkingAgent(null);
+
+          if (decision.action==="done") {
+            break;
+          } else if (decision.action==="intervene") {
+            const orch = agentsMap[orchestratorId];
+            addMsg({ agentId:"system", text:"⚠ 主治医が議論に介入します", isSystem:true });
+            addMsg({ agentId:orchestratorId, name:orch.name, role:orch.role, text:decision.comment, time:new Date().toTimeString().slice(0,8) });
+            context.push({ agentId:orchestratorId, name:orch.name, role:orch.role, text:decision.comment });
+            spokeMembersThisRound.clear();
+            await new Promise(r=>setTimeout(r,3000));
+          } else if (decision.action==="direct") {
+            const targetId = decision.target;
+            if (!agentsMap[targetId] || !agentEnabled[targetId]) {
+              // 指名されたメンバーがOFFになっていたらスキップ
+              addMsg({ agentId:"system", text:`${agentsMap[targetId]?.name||targetId}は現在不参加のため、次へ進みます。`, isSystem:true });
+              continue;
+            }
+            if (decision.comment) {
+              const orch = agentsMap[orchestratorId];
+              addMsg({ agentId:orchestratorId, name:orch.name, role:orch.role, text:decision.comment, time:new Date().toTimeString().slice(0,8) });
+              context.push({ agentId:orchestratorId, name:orch.name, role:orch.role, text:decision.comment });
+              await new Promise(r=>setTimeout(r,2000));
+            }
+            const text = await callAgent(targetId, context);
+            const agent = agentsMap[targetId];
+            const msg = { agentId:targetId, name:agent.name, role:agent.role, text, time:new Date().toTimeString().slice(0,8) };
+            addMsg(msg); context.push(msg);
+            spokeMembersThisRound.add(targetId);
+            setSavedContext([...context]);
+            await new Promise(r=>setTimeout(r,3000));
+          }
+        }
+      }
+      addMsg({ agentId:"system", text:`✅ ラウンド完了！追加情報があれば入力して「次のラウンドへ」を押してください。`, isSystem:true });
+      setRoundDone(true); setSavedContext(context);
+    } catch(e) {
+      setError(e.message);
+      addMsg({ agentId:"system", text:`エラーで中断しました。`, isSystem:true, isError:true });
+    }
+    setThinkingAgent(null); setIsRunning(false);
+  }, [callAgent, checkSpontaneous, askOrchestrator, orchestratorId, agentEnabled]);
+
+  const handleStart = useCallback(() => {
+    if (!taskInput.trim() || !apiKeyRef.current.trim() || isRunning) return;
+    const pipeline = [orchestratorId, ...activeMembers];
+    const ctx = [{ agentId:"user", name:"病院薬剤師", role:"相談者", text:taskInput }];
+    setMessages([]); setSavedContext(ctx); setRound(1); setRoundDone(false); setMemberChanges([]);
+    addMsg({ agentId:"system", text:`カンファレンス開始：「${taskInput}」`, isSystem:true });
+    addMsg({ agentId:"system", text:`参加メンバー：${pipeline.map(id=>agentsMap[id].name).join("、")}`, isSystem:true });
+    runRound1(0, ctx, pipeline);
+  }, [taskInput, isRunning, orchestratorId, activeMembers, runRound1]);
+
+  const handleNextRound = useCallback(() => {
+    if (isRunning || !roundDone) return;
+    const nextRound = round+1; setRound(nextRound);
+    let ctx = [...savedContext];
+    if (userNote.trim()) {
+      ctx.push({ agentId:"user", name:"病院薬剤師", role:"相談者", text:`【追加情報】${userNote.trim()}` });
+      addMsg({ agentId:"system", text:`病院薬剤師より：「${userNote.trim()}」`, isSystem:true });
+      setUserNote("");
+    }
+    // 現在ONのメンバーを通知
+    const currentPipeline = [orchestratorId, ...ALL_AGENTS.filter(a=>agentEnabled[a.id]&&!a.isOrchestrator).map(a=>a.id)];
+    addMsg({ agentId:"system", text:`参加メンバー：${currentPipeline.map(id=>agentsMap[id].name).join("、")}`, isSystem:true });
+    ctx.push({ agentId:"user", name:"システム", role:"", text:`ラウンド${nextRound}開始。前回の議論を踏まえさらに深掘りしてください。` });
+    setSavedContext(ctx);
+    addMsg({ agentId:"system", text:`── ラウンド ${nextRound} 開始（自由討議＋主治医監視） ──`, isSystem:true });
+    runFreeRound(ctx, currentPipeline);
+  }, [isRunning, roundDone, round, savedContext, userNote, orchestratorId, agentEnabled, runFreeRound]);
+
+  const handleResume = useCallback(() => {
+    if (isRunning || resumeFrom===null) return;
+    const pipeline = [orchestratorId, ...activeMembers];
+    if (resumeFrom>=pipeline.length) return;
+    addMsg({ agentId:"system", text:`${agentsMap[pipeline[resumeFrom]]?.name}から再開します...`, isSystem:true });
+    runRound1(resumeFrom, savedContext, pipeline);
+  }, [isRunning, resumeFrom, savedContext, orchestratorId, activeMembers, runRound1]);
+
+  const doneAgents   = new Set(messages.filter(m=>!m.isSystem&&m.agentId).map(m=>m.agentId));
+  const canStart     = taskInput.trim() && apiKey.trim() && !isRunning && activeAgents.length>1;
+  const canResume    = !isRunning && resumeFrom!==null && apiKey.trim();
+  const canNextRound = !isRunning && roundDone && apiKey.trim();
+
+  function renderMarkdown(text) {
+    return text.split(/(\*\*.*?\*\*|\*.*?\*)/g).map((part,i)=>{
+      if (part.startsWith("**")&&part.endsWith("**")) return <strong key={i} style={{fontWeight:700}}>{part.slice(2,-2)}</strong>;
+      if (part.startsWith("*") &&part.endsWith("*"))  return <em key={i}>{part.slice(1,-1)}</em>;
+      return part;
+    });
+  }
+
+  const S = {
+    root:     { fontFamily:"'Hiragino Sans','Noto Sans JP',sans-serif", background:"#f0f4f8", color:"#1a2a3a", minHeight:"100vh", display:"flex", flexDirection:"column" },
+    header:   { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 18px", borderBottom:"2px solid #bbdefb", background:"#ffffff", boxShadow:"0 2px 4px rgba(0,0,0,0.08)" },
+    grid:     { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(148px,1fr))", gap:8, padding:10 },
+    card:     (a,t,enabled) => ({
+      borderRadius:10, padding:10, border:`2px solid ${enabled?a.borderColor:"#d0d0d0"}`,
+      background: enabled ? a.bgColor : "#f5f5f5",
+      position:"relative", transition:"all .3s",
+      opacity: t ? 1 : enabled ? 1 : 0.6,
+      boxShadow: t ? `0 0 16px ${a.color}55` : enabled ? "0 2px 6px rgba(0,0,0,0.1)" : "none",
+      cursor: a.isOrchestrator ? "default" : "pointer",
+    }),
+    dot: (t,enabled) => ({
+      position:"absolute", top:8, right:8, width:8, height:8, borderRadius:"50%",
+      background: t ? "#f57f17" : enabled ? "#43a047" : "#bdbdbd",
+      animation: t ? "pulse 1.5s infinite" : "none",
+    }),
+    avatar: (color,sz=32,enabled=true) => ({
+      width:sz, height:sz, borderRadius:"50%",
+      background: enabled ? color : "#9e9e9e",
+      display:"flex", alignItems:"center", justifyContent:"center",
+      fontSize:sz*.28, fontWeight:700, color:"#fff", flexShrink:0,
+    }),
+    chat:     { borderTop:"2px solid #bbdefb", padding:"12px 16px", display:"flex", flexDirection:"column", gap:14, flex:1, overflowY:"auto", maxHeight:"calc(100vh - 490px)", minHeight:180, background:"#fafcff" },
+    inputBar: { borderTop:"2px solid #bbdefb", padding:"10px 12px", background:"#ffffff", display:"flex", flexDirection:"column", gap:8, boxShadow:"0 -2px 4px rgba(0,0,0,0.05)" },
+    input:    { background:"#f8fafc", border:"1px solid #b0bec5", borderRadius:6, color:"#1a2a3a", padding:"7px 10px", fontSize:13, flex:1, outline:"none" },
+    btn:      (dis,bg="#1565c0") => ({
+      padding:"7px 14px", borderRadius:6, border:"none",
+      cursor: dis?"not-allowed":"pointer",
+      background: dis?"#b0bec5":bg,
+      color:"#fff", fontWeight:700, fontSize:13, transition:"background .2s", whiteSpace:"nowrap",
+    }),
+    footer:   { display:"flex", alignItems:"center", gap:12, padding:"6px 16px", borderTop:"1px solid #bbdefb", fontSize:11, color:"#607d8b", background:"#ffffff", flexWrap:"wrap" },
+  };
+
+  return (
+    <div style={S.root}>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}} @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}`}</style>
+
+      {/* ヘッダー */}
+      <div style={S.header}>
+        <div>
+          <div style={{fontSize:16,fontWeight:800,color:"#1565c0",letterSpacing:"0.05em"}}>🏥 医療カンファレンス AI</div>
+          <div style={{fontSize:10,color:"#78909c",letterSpacing:"0.1em"}}>MULTI-PROFESSIONAL CASE CONFERENCE SYSTEM</div>
+        </div>
+        <span style={{fontSize:11,fontWeight:700,color:isRunning?"#f57f17":roundDone?"#2e7d32":"#1565c0"}}>
+          {isRunning?"⚡ 開催中":canResume?"⏸ 中断中":roundDone?"✅ 完了":"● 待機中"}
+        </span>
+      </div>
+
+      {/* エージェントカード */}
+      <div style={S.grid}>
+        {ALL_AGENTS.map(agent => {
+          const enabled  = agentEnabled[agent.id];
+          const thinking = thinkingAgent===agent.id;
+          const done     = doneAgents.has(agent.id);
+          return (
+            <div key={agent.id} style={S.card(agent,thinking,enabled)}
+              onClick={()=>toggleAgent(agent.id)}
+              title={agent.isOrchestrator?"主治医は常時参加":(enabled?"クリックで退席":"クリックで参加")}>
+              <div style={S.dot(thinking,enabled)}/>
+
+              {/* ON/OFFバッジ */}
+              {!agent.isOrchestrator && (
+                <div style={{
+                  position:"absolute", top:6, right:20, fontSize:9, fontWeight:700,
+                  background:enabled?"#e8f5e9":"#eeeeee",
+                  color:enabled?"#2e7d32":"#9e9e9e",
+                  borderRadius:3, padding:"1px 5px",
+                  border:`1px solid ${enabled?"#a5d6a7":"#bdbdbd"}`,
+                }}>
+                  {enabled?"ON":"OFF"}
+                </div>
+              )}
+              {agent.isOrchestrator && (
+                <div style={{position:"absolute",top:6,right:20,fontSize:9,fontWeight:700,background:"#e3f2fd",color:"#1565c0",borderRadius:3,padding:"1px 5px",border:"1px solid #90caf9"}}>進行役</div>
+              )}
+
+              <div style={{display:"flex",gap:7,alignItems:"center",marginBottom:5,marginTop:2}}>
+                <div style={S.avatar(agent.color,30,enabled)}>{agent.initial}</div>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:11,fontWeight:700,color:enabled?agent.color:"#9e9e9e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{agent.name}</div>
+                  <div style={{fontSize:9,color:enabled?"#607d8b":"#bdbdbd"}}>{agent.role}</div>
+                </div>
+              </div>
+              <div style={{fontSize:9,lineHeight:1.4,color:thinking?"#f57f17":done?"#2e7d32":enabled?"#607d8b":"#bdbdbd"}}>
+                {thinking?"🔮 思考中...":done?"✔ 発言済":enabled?"参加中":"不参加（クリックで参加）"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* チャット */}
+      <div style={S.chat} ref={chatRef}>
+        {messages.length===0 && (
+          <div style={{color:"#90a4ae",fontSize:12,textAlign:"center",marginTop:24,lineHeight:2.2}}>
+            🏥 メンバーを選んで相談内容を入力してください<br/>
+            <span style={{fontSize:10}}>カードをクリックしてON/OFFを切り替えられます（会話中も変更可能）</span>
+          </div>
+        )}
+        {messages.map(msg => {
+          if (msg.isSystem) return (
+            <div key={msg.id} style={{textAlign:"center",fontSize:11,color:msg.isError?"#c62828":"#78909c",animation:"fadeUp .3s ease",padding:"2px 0"}}>
+              ── {msg.text} ──
+            </div>
+          );
+          const agent = agentsMap[msg.agentId];
+          const isUser = !agent;
+          const color  = agent ? agent.color : "#2e7d32";
+          const name   = agent ? agent.name  : "病院薬剤師";
+          const role   = agent ? agent.role  : "相談者";
+          const init   = agent ? agent.initial : "薬";
+          return (
+            <div key={msg.id} style={{display:"flex",gap:10,animation:"fadeUp .35s ease",flexDirection:isUser?"row-reverse":"row"}}>
+              <div style={S.avatar(color,28)}>{init}</div>
+              <div style={{flex:1,maxWidth:"78%"}}>
+                <div style={{display:"flex",gap:8,alignItems:"baseline",marginBottom:3,flexDirection:isUser?"row-reverse":"row"}}>
+                  <span style={{fontSize:12,fontWeight:700,color}}>{name}</span>
+                  <span style={{fontSize:9,color:"#90a4ae"}}>{role}</span>
+                  <span style={{fontSize:9,color:"#b0bec5"}}>{msg.time}</span>
+                </div>
+                <div style={{
+                  fontSize:13,lineHeight:1.75,color:"#263238",
+                  background:isUser?"#e8f5e9":(agent?agent.bgColor:"#fff"),
+                  border:`1px solid ${isUser?"#a5d6a7":(agent?agent.borderColor:"#e0e0e0")}`,
+                  borderRadius:8, padding:"8px 12px",
+                  borderTopLeftRadius: isUser?8:2,
+                  borderTopRightRadius: isUser?2:8,
+                }}>
+                  {renderMarkdown(msg.text)}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {thinkingAgent&&agentsMap[thinkingAgent]&&(()=>{ const a=agentsMap[thinkingAgent]; return (
+          <div style={{display:"flex",gap:10,alignItems:"center",animation:"fadeUp .3s ease"}}>
+            <div style={S.avatar(a.color,28)}>{a.initial}</div>
+            <div style={{background:a.bgColor,border:`1px solid ${a.borderColor}`,borderRadius:8,borderTopLeftRadius:2,padding:"8px 14px"}}>
+              <span style={{fontSize:13,color:a.color,letterSpacing:4}}>・・・</span>
+            </div>
+          </div>
+        ); })()}
+      </div>
+
+      {/* 入力エリア */}
+      <div style={S.inputBar}>
+        {/* APIキー */}
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <span style={{fontSize:11,color:"#607d8b",whiteSpace:"nowrap"}}>API Key:</span>
+          <input type={showApiKey?"text":"password"} placeholder="sk-ant-api...（保存すれば次回自動入力）"
+            value={apiKey} onChange={e=>{setApiKey(e.target.value);setKeySaved(false);}}
+            style={{...S.input,fontFamily:"monospace",fontSize:12}}/>
+          <button onClick={()=>setShowApiKey(v=>!v)} style={S.btn(false,"#78909c")}>{showApiKey?"隠す":"表示"}</button>
+          <button onClick={()=>{localStorage.setItem(STORAGE_KEY,apiKey);setKeySaved(true);}} style={S.btn(false,keySaved?"#2e7d32":"#455a64")}>
+            {keySaved?"✓ 保存済":"💾 保存"}
+          </button>
+        </div>
+
+        {/* 相談内容 */}
+        <div style={{display:"flex",gap:8}}>
+          <input type="text" placeholder="相談内容を入力（例：80歳男性、多剤併用で転倒リスクあり、退院調整について）"
+            value={taskInput} onChange={e=>setTaskInput(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&canStart&&handleStart()}
+            style={S.input} disabled={isRunning}/>
+          {canResume && <button onClick={handleResume} style={S.btn(false,"#7b1fa2")}>↩ 再開</button>}
+          <button onClick={handleStart} disabled={!canStart} style={S.btn(!canStart,"#1565c0")}>
+            {isRunning?"開催中...":"🏥 開始"}
+          </button>
+        </div>
+
+        {/* 追加発言（ラウンド完了後） */}
+        {canNextRound && (
+          <div style={{display:"flex",gap:8,alignItems:"center",background:"#e3f2fd",border:"1px solid #90caf9",borderRadius:8,padding:"8px 12px"}}>
+            <span style={{fontSize:11,color:"#1565c0",whiteSpace:"nowrap"}}>💊 追加情報：</span>
+            <input type="text" placeholder="病院薬剤師として追加情報・意見を入力（省略可）"
+              value={userNote} onChange={e=>setUserNote(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&handleNextRound()}
+              style={{...S.input,background:"#fff"}}/>
+            <button onClick={handleNextRound} style={S.btn(false,"#2e7d32")}>▶ ラウンド{round+1}へ</button>
+          </div>
+        )}
+
+        {error && <div style={{fontSize:11,color:"#c62828",background:"#ffebee",borderRadius:6,padding:"6px 10px"}}>⚠ {error}</div>}
+      </div>
+
+      {/* フッター */}
+      <div style={S.footer}>
+        <span style={{color:isRunning?"#f57f17":roundDone?"#2e7d32":"#1565c0",fontWeight:700}}>
+          {isRunning?"⚡ 開催中":canResume?"⏸ 中断中":roundDone?"✅ 完了":"● 待機中"}
+        </span>
+        {countdown>0 && <span style={{color:"#f57f17",fontWeight:700}}>⏳ {countdown}秒...</span>}
+        <span>参加：{activeAgents.length}名</span>
+        <span>{messages.filter(m=>!m.isSystem).length} 発言</span>
+        <span>Round {round}{modeLabel?` (${modeLabel})`:""}</span>
+        <span style={{marginLeft:"auto"}}>医療カンファレンス AI v1.1</span>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<MedicalConference />);
+</script>
+</body>
+</html>
